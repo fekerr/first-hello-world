@@ -1,143 +1,116 @@
 # Raspberry Pi (ARMv7) Emulation via Docker
 
-This document provides instructions to set up and use a Docker-based Raspberry Pi (ARMv7) emulated environment. This allows you to develop and test applications for ARMv7 architecture, specifically targeting a Debian Bullseye environment similar to Raspberry Pi OS.
+## 1\. Overview
 
-## Quick Start
+This document provides instructions to create and use a Docker-based emulated ARMv7 environment based on Debian Bullseye.
 
-1.  **Ensure Prerequisites:**
-    *   Docker installed and running.
-    *   Docker Buildx enabled (usually default with modern Docker).
-    *   QEMU user-mode static handlers registered:
-        \`\`\`sh
-        docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
-        \`\`\`
-        (Run this once if you haven't before or if you encounter issues running ARM containers).
+The environment is intended for developing and testing applications that target 32-bit ARM systems. Due to limitations of the host emulation platform (Docker Desktop with WSL2 and QEMU), standard privilege escalation tools (`sudo`, `su`) are non-functional within the container's SSH session. Administrative access is achieved via the `docker exec` command.
 
-2.  **Build the Docker Image:**
-    (From the repository root)
-    \`\`\`sh
-    docker buildx build --platform linux/arm/v7 -t rpi_emulated:latest --load rpi_docker/
-    \`\`\`
+## 2\. Prerequisites
 
-3.  **Run the Container:**
-    \`\`\`sh
-    docker run -d -p 2222:22 --name rpi_ssh rpi_emulated:latest
-    \`\`\`
+  * Docker Desktop for Windows, with the WSL2 backend enabled and running.
 
-4.  **SSH into the Emulated RPi:**
-    (Allow a few seconds for SSH to start)
-    \`\`\`sh
-    ssh pi@localhost -p 2222
-    \`\`\`
-    (Default password: \`raspberry\`)
+## 3\. Setup Procedure
 
-    As root:
-    \`\`\`sh
-    ssh root@localhost -p 2222
-    \`\`\`
-    (Default password: \`raspberry\`)
+### 3.1. Create the Dockerfile
 
-5.  **Stop the Container:**
-    \`\`\`sh
-    docker stop rpi_ssh
-    \`\`\`
+In your project directory, create a subdirectory named `rpi_docker`. Inside `rpi_docker`, create a file named `Dockerfile` with the following content.
 
-## Detailed Documentation
+```dockerfile
+# Base image for ARMv7 (32-bit)
+FROM arm32v7/debian:bullseye-slim
 
-### Purpose
+# Install necessary software
+RUN apt-get update && apt-get install -y \
+    openssh-server \
+    sudo \
+    nano \
+    curl \
+    net-tools \
+    apt-utils \
+    --no-install-recommends && \
+    rm -rf /var/lib/apt/lists/*
 
-This Docker setup provides an emulated ARMv7 environment based on Debian Bullseye Slim. It's designed for tasks like:
-- Developing and testing applications for Raspberry Pi (32-bit ARM).
-- Cross-compilation validation.
-- Running ARM-specific tools and utilities.
+# Set permissions for sudo binary. Note: This does not make sudo functional
+# in this environment, but is included for correctness.
+RUN chmod u+s /usr/bin/sudo
 
-### Prerequisites
+# Create standard 'pi' user and add to sudo group.
+RUN useradd -m -s /bin/bash pi && \
+    adduser pi sudo
 
-*   **Docker:** The Docker platform must be installed and the Docker daemon running.
-*   **Docker Buildx:** Required for building multi-architecture images. Check with \`docker buildx version\`. It is usually available by default in recent Docker installations.
-*   **QEMU User-Mode Static Handlers:** To run ARM architecture containers on a non-ARM host system (e.g., x86_64), QEMU's static handlers must be registered. You can do this by running:
-    \`\`\`sh
-    docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
-    \`\`\`
-    This command typically only needs to be run once per host system setup.
+# Set passwords for 'pi' and 'root' users.
+# Note: The root password is not usable via su due to environment restrictions.
+RUN echo 'root:raspberry' | chpasswd
+RUN echo 'pi:raspberry' | chpasswd
 
-### Dockerfile Overview
+# Configure OpenSSH server
+RUN sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+RUN sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
+RUN mkdir -p /run/sshd
+EXPOSE 22
 
-The configuration is defined in \`rpi_docker/Dockerfile\` within this repository. Key aspects:
-- **Base Image:** \`arm32v7/debian:bullseye-slim\`.
-- **Installed Software:** Includes \`openssh-server\`, \`sudo\`, \`nano\`, \`curl\`, \`net-tools\`, and \`apt-utils\`.
-- **Users:**
-    - \`root\` with password \`raspberry\`.
-    - \`pi\` (standard user with \`sudo\` privileges) with password \`raspberry\`.
-- **SSH:** OpenSSH server is installed and configured to start automatically. Port 22 is exposed.
+# Default command to start the SSH daemon
+CMD ["/usr/sbin/sshd", "-D"]
+```
 
-### Building the Image
+### 3.2. Build the Docker Image
 
-Navigate to the root directory of this repository. The build command utilizes \`docker buildx\` to target the \`linux/arm/v7\` platform:
+1.  Navigate your terminal into the `rpi_docker` directory.
+    ```bash
+    cd path/to/your/project/rpi_docker
+    ```
+2.  Execute the build command. The `.` specifies the current directory as the build context.
+    ```bash
+    docker buildx build --platform linux/arm/v7 -t rpi_emulated:latest --load .
+    ```
 
-\`\`\`sh
-docker buildx build --platform linux/arm/v7 -t rpi_emulated:latest --load rpi_docker/
-\`\`\`
-- \`--platform linux/arm/v7\`: Specifies the target architecture.
-- \`-t rpi_emulated:latest\`: Tags the image as \`rpi_emulated:latest\`.
-- \`--load\`: This flag ensures the built image is made available in the local Docker image store, not just the buildx cache.
-- \`rpi_docker/\`: The build context (directory containing the Dockerfile).
+## 4\. Usage
 
-### Running the Container
+### 4.1. Run the Container
 
-To run the container in detached mode with SSH port mapping:
+Execute the following command from your host terminal to start the container in detached mode.
 
-\`\`\`sh
+```bash
 docker run -d -p 2222:22 --name rpi_ssh rpi_emulated:latest
-\`\`\`
-- \`-d\`: Runs the container in the background.
-- \`-p 2222:22\`: Maps port \`2222\` on your host computer to port \`22\` (SSH) inside the container. You can choose a different host port if \`2222\` is in use.
-- \`--name rpi_ssh\`: Assigns a manageable name (\`rpi_ssh\`) to your container.
+```
 
-### Accessing via SSH
+### 4.2. Accessing the Container
 
-After starting the container, wait a few moments for the SSH service to initialize.
+A two-terminal workflow is required for both user-level and administrative access.
 
--   **As user \`pi\`:**
-    \`\`\`sh
+#### 4.2.1. Standard User Access (pi)
+
+For non-administrative tasks like editing files or running code as a standard user.
+
+1.  Connect via SSH. The password is `raspberry`.
+    ```bash
     ssh pi@localhost -p 2222
-    \`\`\`
-    Password: \`raspberry\`
+    ```
+2.  If you receive a `REMOTE HOST IDENTIFICATION HAS CHANGED` error, remove the old host key first, then reconnect.
+    ```bash
+    ssh-keygen -R '[localhost]:2222'
+    ```
 
--   **As user \`root\`:**
-    \`\`\`sh
-    ssh root@localhost -p 2222
-    \`\`\`
-    Password: \`raspberry\`
+#### 4.2.2. Administrator Access (root)
 
-### Security Recommendations
+For administrative tasks like installing packages (`apt install`).
 
-*   **Change Default Passwords:** Upon first login, it is crucial to change the default passwords for both the \`pi\` and \`root\` users. Use the \`passwd\` command inside the container:
-    \`\`\`sh
-    passwd pi
-    passwd root
-    \`\`\`
-*   **SSH Key Authentication:** For enhanced security, consider setting up SSH key-based authentication and disabling password authentication. This involves generating an SSH key pair, copying the public key to \`~/.ssh/authorized_keys\` within the container for the desired user, and then modifying \`/etc/ssh/sshd_config\` to set \`PasswordAuthentication no\`.
+1.  Open a **new** host terminal window.
+2.  Execute the following command to get an interactive root shell in the running container.
+    ```bash
+    docker exec -it --user root rpi_ssh /bin/bash
+    ```
+3.  You will be presented with a root prompt (`root@<container_id>:/#`) and can execute administrative commands directly without `sudo`.
 
-### Container Management
+## 5\. Known Limitations
 
--   **View Logs:**
-    \`\`\`sh
-    docker logs rpi_ssh
-    \`\`\`
--   **Stop the Container:**
-    \`\`\`sh
-    docker stop rpi_ssh
-    \`\`\`
--   **Start a Stopped Container:**
-    \`\`\`sh
-    docker start rpi_ssh
-    \`\`\`
--   **Remove the Container (when no longer needed, after stopping):**
-    \`\`\`sh
-    docker rm rpi_ssh
-    \`\`\`
+  * **Privilege Escalation:** `sudo` and `su` are non-functional within the SSH session. The filesystem is mounted by the host with properties that prevent these tools from gaining root privileges, resulting in errors. The mandatory workflow is to use `docker exec` for root access as described in section 4.2.2.
 
-### Environment Notes
+## 6\. Container Management Commands
 
-The emulated environment is \`linux/arm/v7\` running Debian Bullseye Slim. While it provides a good general ARMv7 environment, it may not perfectly replicate every aspect of a physical Raspberry Pi running Raspberry Pi OS (which is also Debian-based but has Raspberry Pi-specific configurations and pre-installed software).
+  * **List running containers:** `docker ps`
+  * **Stop the container:** `docker stop rpi_ssh`
+  * **Start a stopped container:** `docker start rpi_ssh`
+  * **Remove the container (must be stopped first):** `docker rm rpi_ssh`
+
