@@ -1,0 +1,211 @@
+#!/bin/bash
+#
+# Management script for the Raspberry Pi Emulation Environment.
+#
+set -e # Exit immediately if a command exits with a non-zero status.
+
+# --- Configuration ---
+IMAGE_NAME="rpi_emulated:latest"
+CONTAINER_NAME="rpi_ssh"
+SSH_PORT="2222"
+SSH_USER="pi"
+
+# --- Helper Functions ---
+
+show_help() {
+    echo "Usage: ./doit [command]"
+    echo ""
+    echo "Workflow Commands:"
+    echo "  cleanrestart  Runs the full cycle: cleanup -> build -> run -> ssh."
+    echo ""
+    echo "Individual Commands:"
+    echo "  install   Register QEMU for multi-arch support (one-time setup)."
+    echo "  build     Build the Docker image from the current directory."
+    echo "  run       Run the container with the './shared' directory mounted."
+    echo "  stop      Stop the running container."
+    echo "  status    Show status of Docker, the image, and the container."
+    echo "  ssh       Connect to the container via SSH as the 'pi' user."
+    echo "  root      Get an interactive root shell in the running container."
+    echo "  cleanup   Stop and remove the container."
+    echo "  help      Show this help message."
+}
+
+# --- State Verification Functions ---
+
+check_image_exists() {
+    if [[ -z $(docker images -q "${IMAGE_NAME}") ]]; then
+        echo "Error: Docker image '${IMAGE_NAME}' not found. Please run './doit build' first." >&2
+        exit 1
+    fi
+}
+
+check_container_running() {
+    if ! docker ps -a --filter "name=${CONTAINER_NAME}" --filter "status=running" | grep -q "${CONTAINER_NAME}"; then
+        echo "Error: Container '${CONTAINER_NAME}' is not running. Please run './doit run' first." >&2
+        exit 1
+    fi
+}
+
+
+# --- Command Functions ---
+
+do_install() {
+    echo "--- Registering QEMU (one-time setup) ---"
+    docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
+}
+
+do_build() {
+    echo "--- Building Docker image: ${IMAGE_NAME} ---"
+    docker buildx build --platform linux/arm/v7 -t "${IMAGE_NAME}" --load .
+}
+
+do_run() {
+    check_image_exists
+    echo "--- Ensuring host shared directory exists ---"
+    mkdir -p shared
+    echo "--- Starting container: ${CONTAINER_NAME} ---"
+    docker stop "${CONTAINER_NAME}" > /dev/null 2>&1 || true
+    docker rm "${CONTAINER_NAME}" > /dev/null 2>&1 || true
+    docker run \
+      -d \
+      -p "${SSH_PORT}:22" \
+      --name "${CONTAINER_NAME}" \
+      -v "$(pwd)/shared:/home/pi/shared" \
+      "${IMAGE_NAME}"
+    echo "Container started. Wait ~5 seconds before trying to SSH."
+}
+
+do_stop() {
+    echo "--- Stopping container: ${CONTAINER_NAME} ---"
+    docker stop "${CONTAINER_NAME}" > /dev/null 2>&1 || true
+    echo "Stop command issued."
+}
+
+do_status() {
+    echo "--- System & Project Status ---"
+    echo ""
+
+    # 1. Check if Docker daemon is running
+    echo "[1] Docker Daemon Status:"
+    if ! docker info > /dev/null 2>&1; then
+        echo "    ERROR: Docker daemon is not running."
+        exit 1
+    fi
+    DOCKER_VERSION=$(docker version --format '{{.Server.Version}}')
+    echo "    OK - Docker Server Version: ${DOCKER_VERSION}"
+    echo ""
+
+    # 2. Check if the required Docker image exists
+    echo "[2] Docker Image Status:"
+    if [[ -z $(docker images -q "${IMAGE_NAME}") ]]; then
+        echo "    NOT FOUND - Image '${IMAGE_NAME}' has not been built."
+        echo "    Run './doit build'"
+    else
+        echo "    FOUND - Image '${IMAGE_NAME}' exists locally."
+    fi
+    echo ""
+
+    # 3. Check the status of the specific container for this project
+    echo "[3] Project Container Status ('${CONTAINER_NAME}'):"
+    docker ps -a --filter "name=${CONTAINER_NAME}"
+    echo ""
+
+    # 4. Check the status of the bind mount
+    echo "[4] Bind Mount Status:"
+    if [ ! -d "shared" ]; then
+        echo "    Local './shared' directory: NOT FOUND."
+    else
+        echo "    Local './shared' directory: Found."
+    fi
+
+    if docker ps -a --filter "name=${CONTAINER_NAME}" --filter "status=running" | grep -q "${CONTAINER_NAME}"; then
+        if docker inspect --format '{{json .Mounts}}' "${CONTAINER_NAME}" | grep -q "/home/pi/shared"; then
+            echo "    Container mount point ('/home/pi/shared'): Configured."
+        else
+            echo "    Container mount point ('/home/pi/shared'): NOT CONFIGURED."
+        fi
+    else
+        echo "    Container mount point: Not verified (container is not running)."
+    fi
+}
+
+do_ssh() {
+    check_container_running
+    echo "--- Attempting SSH connection ---"
+    local SSH_OPTIONS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+    echo "Connecting to ${SSH_USER}@localhost on port ${SSH_PORT}..."
+    echo "Default password is: raspberry"
+    ssh ${SSH_OPTIONS} "${SSH_USER}@localhost" -p "${SSH_PORT}"
+}
+
+do_root_shell() {
+    check_container_running
+    echo "--- Getting root shell via 'docker exec' ---"
+    docker exec -it --user root "${CONTAINER_NAME}" /bin/bash
+}
+
+do_cleanup() {
+    echo "--- Stopping and removing container: ${CONTAINER_NAME} ---"
+    docker stop "${CONTAINER_NAME}" > /dev/null 2>&1 || true
+    docker rm "${CONTAINER_NAME}" > /dev/null 2>&1 || true
+    echo "Cleanup complete."
+}
+
+do_cleanrestart() {
+    echo "---== Starting Full Restart Cycle ==---"
+    do_cleanup
+    do_build
+    do_run
+    # Add a small delay to ensure sshd is ready before connecting
+    echo "Waiting 5 seconds for SSH daemon to initialize..."
+    sleep 5
+    do_ssh
+}
+
+
+# --- Main Logic ---
+COMMAND="$1"
+
+if [[ -z "$COMMAND" ]]; then
+    echo "Error: No command specified." >&2
+    show_help
+    exit 1
+fi
+
+case "$COMMAND" in
+    install)
+        do_install
+        ;;
+    build)
+        do_build
+        ;;
+    run)
+        do_run
+        ;;
+    stop)
+        do_stop
+        ;;
+    status)
+        do_status
+        ;;
+    ssh)
+        do_ssh
+        ;;
+    root)
+        do_root_shell
+        ;;
+    cleanup)
+        do_cleanup
+        ;;
+    cleanrestart)
+        do_cleanrestart
+        ;;
+    help)
+        show_help
+        ;;
+    *)
+        echo "Error: Unknown command '$COMMAND'" >&2
+        show_help
+        exit 1
+        ;;
+esac

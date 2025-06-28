@@ -1,0 +1,149 @@
+#!/bin/bash
+#
+# Management script for the Raspberry Pi Emulation Environment.
+#
+set -e # Exit immediately if a command exits with a non-zero status.
+
+# --- Configuration ---
+IMAGE_NAME="rpi_emulated:latest"
+CONTAINER_NAME="rpi_ssh"
+SSH_PORT="2222"
+SSH_USER="pi"
+
+# --- Helper Functions ---
+# These functions define the logic for each command.
+
+show_help() {
+    echo "Usage: ./doit [command]"
+    echo ""
+    echo "Commands:"
+    echo "  install   Register QEMU for multi-arch support (one-time setup)."
+    echo "  build     Build the Docker image from the current directory."
+    echo "  run       Run the container in the background."
+    echo "  stop      Stop the running container."
+    echo "  status    Show status of Docker, the image, and the container."
+    echo "  ssh       Connect to the container via SSH as the 'pi' user."
+    echo "  root      Get an interactive root shell in the running container."
+    echo "  cleanup   Stop and remove the container."
+    echo "  help      Show this help message."
+}
+
+do_install() {
+    echo "--- Registering QEMU (one-time setup) ---"
+    docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
+}
+
+do_build() {
+    echo "--- Building Docker image: ${IMAGE_NAME} ---"
+    docker buildx build --platform linux/arm/v7 -t "${IMAGE_NAME}" --load .
+}
+
+do_run() {
+    echo "--- Running container: ${CONTAINER_NAME} ---"
+    # Stop and remove any existing container with the same name first.
+    docker stop "${CONTAINER_NAME}" > /dev/null 2>&1 || true
+    docker rm "${CONTAINER_NAME}" > /dev/null 2>&1 || true
+    docker run -d -p "${SSH_PORT}:22" --name "${CONTAINER_NAME}" "${IMAGE_NAME}"
+    echo "Container started. Wait ~5 seconds before trying to SSH."
+}
+
+do_stop() {
+    echo "--- Stopping container: ${CONTAINER_NAME} ---"
+    docker stop "${CONTAINER_NAME}"
+}
+
+do_status() {
+    echo "--- System & Project Status ---"
+    echo ""
+
+    # 1. Check if Docker daemon is running
+    echo "[1] Docker Daemon Status:"
+    if ! docker info > /dev/null 2>&1; then
+        echo "    ERROR: Docker daemon is not running."
+        exit 1
+    fi
+    DOCKER_VERSION=$(docker version --format '{{.Server.Version}}')
+    echo "    OK - Docker Server Version: ${DOCKER_VERSION}"
+    echo ""
+
+    # 2. Check if the required Docker image exists
+    echo "[2] Docker Image Status:"
+    if [[ -z $(docker images -q "${IMAGE_NAME}") ]]; then
+        echo "    NOT FOUND - Image '${IMAGE_NAME}' has not been built."
+        echo "    Run './doit build'"
+    else
+        echo "    FOUND - Image '${IMAGE_NAME}' exists locally."
+    fi
+    echo ""
+
+    # 3. Check the status of the specific container for this project
+    echo "[3] Project Container Status ('${CONTAINER_NAME}'):"
+    # The output of this command is a formatted table, which is ideal for a status check.
+    # It will show if the container is running, exited, or not created.
+    docker ps -a --filter "name=${CONTAINER_NAME}"
+}
+
+do_ssh() {
+    echo "--- Attempting SSH connection ---"
+    # First, automatically remove any old host keys for this port to prevent errors.
+    ssh-keygen -R "[localhost]:${SSH_PORT}" > /dev/null 2>&1 || true
+    echo "Connecting to ${SSH_USER}@localhost on port ${SSH_PORT}..."
+    ssh "${SSH_USER}@localhost" -p "${SSH_PORT}"
+}
+
+do_root_shell() {
+    echo "--- Getting root shell via 'docker exec' ---"
+    docker exec -it --user root "${CONTAINER_NAME}" /bin/bash
+}
+
+do_cleanup() {
+    echo "--- Stopping and removing container: ${CONTAINER_NAME} ---"
+    docker stop "${CONTAINER_NAME}"
+    docker rm "${CONTAINER_NAME}"
+}
+
+# --- Main Logic ---
+# This part of the script reads the command you provide and calls the correct function.
+
+COMMAND="$1"
+
+if [[ -z "$COMMAND" ]]; then
+    echo "Error: No command specified." >&2
+    show_help
+    exit 1
+fi
+
+case "$COMMAND" in
+    install)
+        do_install
+        ;;
+    build)
+        do_build
+        ;;
+    run)
+        do_run
+        ;;
+    stop)
+        do_stop
+        ;;
+    status)
+        do_status
+        ;;
+    ssh)
+        do_ssh
+        ;;
+    root)
+        do_root_shell
+        ;;
+    cleanup)
+        do_cleanup
+        ;;
+    help)
+        show_help
+        ;;
+    *)
+        echo "Error: Unknown command '$COMMAND'" >&2
+        show_help
+        exit 1
+        ;;
+esac
